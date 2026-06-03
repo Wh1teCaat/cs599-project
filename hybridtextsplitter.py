@@ -17,8 +17,8 @@ class HybridTextSplitter:
     def __init__(
         self,
         cache_path,  # embedding 缓存文件路径
-        chunk_size=420,  # 子块大小（用于向量索引）
-        chunk_overlap=80,  # 子块自适应 overlap 的最大补充窗口
+        chunk_size=500,  # 子块大小（用于向量索引）
+        chunk_overlap=50,  # 子块固定重叠 token 数
         parent_chunk_size=1200,  # 父块大小（用于回答时返回更完整上下文）
         parent_chunk_overlap=120,  # 父块切分重叠
         buffer_size=4,  # 预留参数：语义切分缓冲区大小
@@ -41,36 +41,30 @@ class HybridTextSplitter:
         self.filter_max_docs = filter_max_docs
         self.parent_store = {}
 
-        # Step 1: 结构优先切分（标题/段落/列表优先）
-        self.structure_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self.parent_chunk_size * 2,
-            chunk_overlap=0,
+        # Step 1: 父块切分 — 结构标记优先 + tiktoken 控长（三段精简为两段）
+        self.parent_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+            model_name=os.getenv("MODEL_NAME"),
+            chunk_size=self.parent_chunk_size,
+            chunk_overlap=self.parent_chunk_overlap,
             separators=[
                 "\n# ", "\n## ", "\n### ",
                 "\n一、", "\n二、", "\n三、",
                 "\n1.", "\n2.", "\n3.",
                 "\n- ", "\n* ",
                 "\n\n", "\n",
+                "。", "！", "？", "，",
             ],
         )
 
-        # Step 2: 父块 token 控长
-        self.parent_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
-            model_name=os.getenv("MODEL_NAME"),
-            chunk_size=self.parent_chunk_size,
-            chunk_overlap=self.parent_chunk_overlap,
-            separators=["\n\n", "\n", "。", "！", "？", "，"],
-        )
-
-        # Step 3: 子块 token 控长，overlap 交由自适应逻辑处理
+        # Step 2: 子块 token 控长（固定 overlap + 自适应 overlap 兜底）
         self.child_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
             model_name=os.getenv("MODEL_NAME"),
             chunk_size=self.chunk_size,
-            chunk_overlap=0,
+            chunk_overlap=self.chunk_overlap,
             separators=["\n\n", "\n", "。", "！", "？", "；", "，"],
         )
 
-        # Step 4: 可选 embedding 去重
+        # Step 3: 可选 embedding 去重
         if self.enable_filter:
             self.filter = EmbeddingsRedundantFilter(
                 embeddings=self.embedding_model,
@@ -114,8 +108,7 @@ class HybridTextSplitter:
         return unique_docs
 
     def _build_parent_docs(self, documents: list[Document]) -> list[Document]:
-        structured_docs = self.structure_splitter.split_documents(documents)
-        parent_docs = self.parent_splitter.split_documents(structured_docs)
+        parent_docs = self.parent_splitter.split_documents(documents)
         results = []
         self.parent_store = {}
         for doc in parent_docs:
@@ -147,8 +140,8 @@ class HybridTextSplitter:
         return child_docs
 
     def split(self, documents: list[Document]) -> list[Document]:
-        """结构优先 + 父子块 + 轻量去重 + 可选 embedding 去重。"""
-        print("Step 1️⃣ 结构优先切分 ...")
+        """父块切分 + 子块切分 + 轻量去重 + 可选 embedding 去重。"""
+        print("Step 1️⃣ 父块切分 ...")
         parent_docs = self._build_parent_docs(documents)
         print(f"  → 父块数量: {len(parent_docs)}")
 

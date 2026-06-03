@@ -90,7 +90,7 @@ class MultiLoader(BaseLoader):
             return dataset_name, dataset_config
         return filename, None
 
-    def _load_file(self, filename: str, sample_num=100) -> list[Document]:
+    def _load_file(self, filename: str, sample_num=100, datasets: list[str] | None = None) -> list[Document]:
         """加载 huggingface 数据或本地文件"""
         path = os.path.join(self.path, filename)
 
@@ -98,7 +98,12 @@ class MultiLoader(BaseLoader):
         if os.path.isdir(path):
             docs = []
             for sub_item in os.listdir(path):
-                docs.extend(self._load_file(os.path.join(filename, sub_item), sample_num=sample_num))
+                # 按数据集过滤：在文件级匹配（去掉扩展名后和 datasets 比对）
+                if datasets is not None:
+                    item_stem = os.path.splitext(sub_item)[0]
+                    if item_stem not in datasets:
+                        continue
+                docs.extend(self._load_file(os.path.join(filename, sub_item), sample_num=sample_num, datasets=datasets))
             return docs
 
         if os.path.isfile(path):
@@ -180,9 +185,14 @@ class MultiLoader(BaseLoader):
 
         return []
 
-    def load(self, sample_num=32):
-        """加载路径下所有文件，并随机抽样固定数量文档。"""
-        # 读取目录下所有文件名
+    def load(self, sample_num=32, datasets: list[str] | None = None):
+        """加载路径下所有文件，并随机抽样固定数量文档。
+
+        Args:
+            sample_num: 采样文档数量。
+            datasets: 限定加载的数据集名称列表（如 ["passage_retrieval_en", "2wikimqa_e"]），
+                      None 表示加载全部。
+        """
         items = os.listdir(self.path)
         docs = []
         for item in items:
@@ -193,7 +203,7 @@ class MultiLoader(BaseLoader):
                     path = self._convert_huggingface_path(dirname)
                     docs.extend(self._load_file(path))
             else:
-                docs.extend(self._load_file(item))
+                docs.extend(self._load_file(item, datasets=datasets))
 
         if sample_num is not None and sample_num > 0 and len(docs) > sample_num:
             docs = random.sample(docs, sample_num)

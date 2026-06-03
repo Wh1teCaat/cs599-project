@@ -10,7 +10,4 @@ retriever:
 database:
   dsn: "host=localhost user=postgres password=020203 dbname=golearn port=5432 sslmode=disable TimeZone=Asia/Shanghai"
 
-jwt:
-  hs256_secret: "butterfly"
-
 python_addr: "[::]:50052"

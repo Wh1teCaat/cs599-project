@@ -16,7 +16,7 @@ class CacheEmbedding(Embeddings):
     def __init__(
         self,
         cache_path,
-        batch_size=16,
+        batch_size=8,
     ):
         self.cache_path = cache_path
         self.batch_size = batch_size
