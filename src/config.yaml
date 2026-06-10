@@ -2,10 +2,10 @@ loader:
   data_path: /mnt/e/huggingface/dataset
 
 embedding:
-  cache_path: cache/embeddings_cache.json
+  cache_path: ../data/embeddings_cache.json
 
 retriever:
-  db_path: chroma_db
+  db_path: ../data/chroma_db
 
 database:
   dsn: "host=localhost user=postgres password=020203 dbname=golearn port=5432 sslmode=disable TimeZone=Asia/Shanghai"

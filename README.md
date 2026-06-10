@@ -1,165 +1,194 @@
-# RAG Service — Agentic 混合检索系统
+# Agentic RAG 知识库检索服务
+
+![Python](https://img.shields.io/badge/Python-3.10--3.12-blue)
+![Framework](https://img.shields.io/badge/Framework-LangGraph-green)
+![Status](https://img.shields.io/badge/Status-MVP-yellow)
 
 ## 项目简介
 
-基于 LangGraph + Tool Calling 的 Agentic 混合检索系统。LLM 自主判定查询类型，选择向量语义检索、BM25 关键词检索或双路并行，RRF 融合后经评估循环（最多 3 轮）输出父块上下文。
+一个基于 Agentic AI 的 RAG 服务：LLM 自主判断查询类型并选择检索策略（向量 / BM25 / 混合），替代传统的固定单次向量召回流程，解决 RAG 检索路径单一、难以适应多样化查询场景的问题。
 
-## 方向
+## 核心特性
 
-方向一：Agentic AI 原生开发
+- **Agentic 检索决策**：基于 LangGraph 构建检索 Agent，由模型按问题类型自主选择向量检索、BM25 检索或混合检索。
+- **Graph Retriever 流程**：将查询改写、工具调用、RRF 融合、充分性评估和父块回填组织成可追踪的图流程。
+- **混合召回能力**：结合语义向量检索与 BM25 关键词检索，兼顾概念型问题和专有名词、型号、API 等精确查询。
+- **父子块结构**：索引阶段保存子块用于召回，同时保留父块用于回答时补全上下文。
+- **本地缓存与持久化**：支持 ChromaDB 向量库、BM25 语料和 embedding 缓存，减少重复构建成本。
+
+## 项目方向
+
+方向一：Agentic AI 原生开发 — 重点展示 LLM 如何参与检索路径规划，而不是只把 RAG 固定成单次向量召回。
 
 ## 技术栈
 
-| 层级 | 技术 |
-|------|------|
-| LLM | OpenAI API (gpt-4o-mini) |
-| Embedding | BGE-m3 (HuggingFace + CUDA) |
-| 精排 | BGE-reranker-v2-m3 (CrossEncoder) |
-| 关键词检索 | BM25Okapi + jieba 中文分词 |
-| 向量数据库 | ChromaDB |
-| Agent 框架 | LangGraph (Tool Calling + Postgres checkpoint) |
-| 数据源 | LongBench (HuggingFace Datasets) |
+- AI IDE: Trae CN
+- LLM: DeepSeek API
+- 框架: LangGraph
+- 容器: Docker
+
+## 架构说明
+
+详细架构见 [docs/architecture.md](docs/architecture.md)。核心流程如下：
+
+```text
+User Query
+  -> rewrite_query
+  -> agent decides tools
+  -> vector_search / bm25_search
+  -> optional RRF fusion
+  -> sufficiency evaluation
+  -> parent document expansion
+  -> final documents
+```
 
 ## 目录结构
 
-```
-rag_service/
-├── main.py                    # CLI 入口
-├── cli.py                     # build() / query() 胶水层
-├── config.yaml                # 路径配置
-├── .env                       # 环境变量 (不提交)
-│
-├── indexer.py                 # 索引构建 (离线)
-├── graph_retriever.py         # LangGraph Agent 检索图
-├── tools.py                   # @tool 定义 (vector_search / bm25_search)
-│
-├── retriever/                 # 检索组件
-│   ├── __init__.py
-│   ├── bm25.py                # BM25Retriever
-│   ├── rerank.py              # ReRanker
-│   └── vector.py              # ChromaDB 加载
-│
-├── cachembedding.py           # Embedding 缓存
-├── hybridtextsplitter.py      # 父块 + 子块切分
-├── multiloader.py             # 多格式数据加载
-├── download_bge.py            # BGE 模型下载
-│
-├── chroma_db/                 # 向量库 + BM25 语料 + parent_store
-├── cache/                     # Embedding 缓存
-└── docs/                      # 设计文档
+```text
+rag-service/
+├── docs/                         # 项目文档
+│   ├── architecture.md           # 详细架构说明
+│   └── agentic-graph-retriever.md
+├── src/                          # 项目源代码
+│   ├── main.py                   # 命令入口（build / query / serve）
+│   ├── cli.py                    # 命令行参数解析
+│   ├── indexer.py                # 索引构建（分块、embedding、BM25 语料）
+│   ├── graph_retriever.py        # LangGraph Agentic 检索图
+│   ├── tools.py                  # 检索工具封装（@tool 供 Agent 调用）
+│   ├── multiloader.py            # 多格式数据加载
+│   ├── hybridtextsplitter.py     # 混合文本切分（结构 + 语义边界）
+│   ├── cachembedding.py          # 嵌入缓存（磁盘持久化 + 去重）
+│   ├── download_bge.py           # BGE 模型下载脚本
+│   ├── config.yaml               # 数据集路径配置
+│   └── retriever/                # 检索组件（BM25 / ReRank / Vector）
+├── data/                          # 运行时数据（gitignore，构建后生成）
+│   ├── chroma_db/                 # 向量库 + BM25 语料
+│   └── embeddings_cache.json      # embedding 缓存
+├── requirements.txt              # 项目依赖
+├── .gitignore                    # 排除 .env、缓存、虚拟环境等
+└── README.md
 ```
 
-| 模块 | 职责 |
-|------|------|
-| `main.py` | CLI 入口：build / query / serve |
-| `cli.py` | 组件组装：加载 DB → 注入工具 → 构建 GraphRetriever |
-| `indexer.py` | 离线索引：文档加载 → 切分 → ChromaDB + BM25 语料 + parent_store |
-| `graph_retriever.py` | LangGraph 图 (8 结点)：rewrite → agent → tools → merge → accum → evaluate → parent_doc |
-| `tools.py` | @tool 定义：vector_search / bm25_search，供 Agent Tool Calling |
-| `retriever/bm25.py` | jieba + BM25Okapi 关键词检索 |
-| `retriever/rerank.py` | CrossEncoder 精排 (bge-reranker-v2-m3) |
-| `retriever/vector.py` | ChromaDB 向量检索器加载 |
-| `cachembedding.py` | SHA256 哈希 Embedding 缓存 |
-| `hybridtextsplitter.py` | 父块(1200) + 子块(500) 双层切分 |
-| `multiloader.py` | LongBench 数据集 + 本地文件加载 |
+## 运行前检查
+
+```bash
+python --version          # 应输出 3.10.x ~ 3.12.x；暂不建议 Python 3.13
+pip install -r requirements.txt
+cd src && python main.py --help
+```
+
+确认 `main.py --help` 正常输出后再继续以下步骤。
 
 ## 环境搭建
 
 ### 1. 依赖安装
 
-```bash
-pip install -e .
-```
-
-核心依赖：`langchain` `langchain-chroma` `langchain-huggingface` `langchain-openai` `langgraph` `jieba` `rank-bm25` `sentence-transformers` `datasets` `psycopg`
-
-### 2. 环境变量 (`.env`)
+创建虚拟环境并安装依赖：
 
 ```bash
-# LLM
-MODEL_NAME=gpt-4o-mini
-OPENAI_API_KEY=sk-xxx
-OPENAI_BASE_URL=https://api.openai-proxy.org/v1
-
-# Embedding & ReRanker (本地模型)
-HF_MODEL_NAME=/mnt/e/huggingface/embedding_model/bge-m3
-RERANK_MODEL_NAME=/mnt/e/huggingface/embedding_model/bge-reranker-v2-m3
-
-# PostgreSQL (Agent checkpoint 持久化)
-POSTGRES_URL=postgresql://postgres:020203@localhost:5432/agent_db
-
-# Proxy
-HTTP_PROXY=http://127.0.0.1:10808
-HTTPS_PROXY=http://127.0.0.1:10808
-
-# tiktoken 离线缓存
-TIKTOKEN_CACHE_DIR=/tmp/data-gym-cache
+python -m venv .venv
+source .venv/bin/activate        # Windows: .\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 ```
 
-### 3. 下载模型
+> 如果不使用 PostgreSQL checkpoint，则无需安装可选依赖；相关 import 仅在设置了 `POSTGRES_URL` 时触发，不会影响基础检索功能。
+
+### 2. 环境变量配置
+
+在项目根目录创建 `.env`，至少配置模型调用所需的 Key 和模型名称。
+
+> ⚠️ 不要把 API Key 硬编码到代码里，也不要提交 `.env`。
+
+```env
+# LLM 调用（DeepSeek API，兼容 OpenAI SDK）
+OPENAI_API_KEY=your_api_key
+OPENAI_BASE_URL=https://api.deepseek.com/v1
+MODEL_NAME=deepseek-chat
+
+# Embedding 模型
+HF_MODEL_NAME=BAAI/bge-m3
+EMBEDDING_DEVICE=cuda            # 无 GPU 时改为 cpu
+
+# Reranker 模型
+RERANK_MODEL_NAME=BAAI/bge-reranker-v2-m3
+
+# PostgreSQL checkpoint（可选，不填则使用内存存储）
+POSTGRES_URL=
+```
+
+### 3. 启动步骤
 
 ```bash
-python download_bge.py
+# 修改 src/config.yaml 中的数据集路径、向量库路径和缓存路径
+# 构建索引（小样本验证）
+cd src
+python main.py build --sample 100 --mode offline
+
+# 执行查询
+python main.py query "你的问题" --topk 5
 ```
 
-## 使用方式
+首次配置预计 10-20 分钟；如需下载 BGE embedding / rerank 模型，额外耗时取决于网络。
 
-### 构建向量库
+## API 调用（待完善）
+
+`python main.py serve` 通过 `langgraph serve` 启动 LangGraph API 服务（默认 `http://127.0.0.1:2024`），但当前缺少 `src/langgraph.json` 配置文件，且 graph 对象未以模块级变量导出，`langgraph serve` 暂不可用。计划后续补充 `langgraph.json` 并将 `GraphRetriever` 封装为 LangGraph 可发现的服务入口。
+
+## 环境要求
+
+- Python 3.12
+- 推荐 16 GB 内存；小样本验证可降低数据量
+- embedding 默认使用 CUDA，无 GPU 时在 `.env` 中设置 `EMBEDDING_DEVICE=cpu`
+- BGE-M3 embedding 模型约 2.2 GB，reranker 模型约 1.1 GB；请预留模型缓存和 ChromaDB 索引空间
+
+## 测试
+
+建议在 `langgraph_env` 或安装完整依赖的 Python 3.12 环境中运行测试。无 GPU
+时请设置 `EMBEDDING_DEVICE=cpu`。
+
+### 综合自动化测试
+
+默认综合测试会执行：
+
+- 索引构建 / 追加的分批写入与 BM25 同步单元测试
+- RAG 排序指标公式测试
+- 索引一致性汇总逻辑测试
+- 当前真实落盘索引的一致性检查（Chroma、BM25、parent_store）
 
 ```bash
-# 限定数据集构建
-python main.py build --datasets passage_retrieval_en,2wikimqa_e,hotpotqa_e
-
-# 采样构建（快速验证）
-python main.py build --datasets passage_retrieval_en --sample 8
-
-# 全量构建
-python main.py build
+python tests/run_all_tests.py
 ```
 
-### 检索查询
+如需同时跑真实向量检索评估，开启 `--with-recall`：
 
 ```bash
-python main.py query "什么是注意力机制" --topk 5
+EMBEDDING_DEVICE=cpu python tests/run_all_tests.py --with-recall --sample-size 10 --ks 1,5,10,20
 ```
 
-### 启动 LangGraph 服务
+### 单项测试
 
 ```bash
-python main.py serve
+# 索引写入完整性：分批写 Chroma、BM25 同步、parent_store 保存、metadata 规范化
+python tests/test_indexing_integrity.py
+
+# 真实落盘索引一致性：Chroma / BM25 / parent_store 数量和 chunk_hash 是否一致
+python tests/test_index_consistency.py
+
+# 指标公式：rank、MRR@K、nDCG@K
+python tests/test_rag_evaluation_metrics.py
+
+# 真实向量检索效果：Recall@K、MRR@K、nDCG@K
+EMBEDDING_DEVICE=cpu python tests/test_vector_recall.py --sample-size 50 --ks 1,5,10,20
 ```
 
-## 架构
+指标含义：
 
-### Agent 检索流程
-
-```
-START → rewrite_query → agent → execute_tools → decide_merge → accum → evaluate
-                                                                          │
-                                                     "不够" → agent (≤3 轮)
-                                                     "够了" → parent_doc → END
-```
-
-### LLM 路由规则
-
-| 查询类型 | 判定条件 | 检索策略 |
-|---------|---------|---------|
-| 精准查询 | 专有名词/型号/API/版本 | 只调 bm25_search |
-| 模糊查询 | 概念解释/日常意图 | 只调 vector_search |
-| 复杂查询 | 系统设计/多维对比 | 双路并行 → RRF 融合 |
-
-### Agentic 特性
-
-| 特性 | 实现 |
-|------|------|
-| Tool Calling | LLM 自主选择 vector_search / bm25_search |
-| 并行调用 | 复杂查询时一条消息两个 tool_call，同时执行 |
-| 条件 RRF | 双路才融合，单路直通 |
-| 评估循环 | evaluate 结点 LLM 判断是否充分，不够改写 query 重搜 |
-| Checkpoint | PostgreSQL 持久化，支持会话恢复 |
+- `Recall@K`：标准文档是否出现在 top K 检索结果中。
+- `MRR@K`：第一个标准文档排得多靠前，公式是 `1 / rank`。
+- `nDCG@K`：标准文档排序质量，使用 `1 / log2(rank + 1)` 做排名折损。
 
 ## 项目状态
 
 - [x] Proposal
 - [x] MVP
-- [ ] Final
+- [ ] Final（待补充最终报告与完整实验结果）

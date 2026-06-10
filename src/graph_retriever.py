@@ -21,7 +21,6 @@ import dotenv
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, StateGraph
 
 dotenv.load_dotenv()
@@ -170,6 +169,8 @@ class GraphRetriever:
         pg_url = os.getenv("POSTGRES_URL", "")
         if pg_url:
             import psycopg
+            from langgraph.checkpoint.postgres import PostgresSaver
+
             self._checkpoint_conn = psycopg.connect(pg_url)
             self._checkpointer = PostgresSaver(self._checkpoint_conn)
             self._checkpointer.setup()

@@ -22,7 +22,7 @@ class CacheEmbedding(Embeddings):
         self.batch_size = batch_size
         self.embeddings = HuggingFaceEmbeddings(
             model_name=os.getenv("HF_MODEL_NAME"),
-            model_kwargs={"device": "cuda"},  # GPU 加速
+            model_kwargs={"device": os.getenv("EMBEDDING_DEVICE", "cuda")},
             encode_kwargs={"batch_size": self.batch_size, "normalize_embeddings": True}
         )
 
@@ -46,8 +46,12 @@ class CacheEmbedding(Embeddings):
         return {}
 
     def _save_cache(self):
-        with open(self.cache_path, "w", encoding="utf-8") as f:
+        cache_dir = os.path.dirname(self.cache_path) or "."
+        os.makedirs(cache_dir, exist_ok=True)
+        tmp_path = f"{self.cache_path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(self.cache, f)
+        os.replace(tmp_path, self.cache_path)
 
     @staticmethod
     def _text_hash(text: str) -> str:
@@ -67,22 +71,27 @@ class CacheEmbedding(Embeddings):
 
     def _embed_batch(self, texts: list[str]) -> list[list[float]]:
         """批量嵌入"""
-        results, to_compute = [], []
-        for text in texts:
+        results: list[list[float] | None] = [None] * len(texts)
+        to_compute: list[str] = []
+        compute_positions: list[int] = []
+
+        for idx, text in enumerate(texts):
             _hash = self._text_hash(text)
             if _hash in self.cache:
-                results.append(self.cache[_hash])
+                results[idx] = self.cache[_hash]
             else:
+                compute_positions.append(idx)
                 to_compute.append(text)
 
-        if to_compute is not None:
+        if to_compute:
             vectors = self.embeddings.embed_documents(to_compute)
-            for t, v in zip(to_compute, vectors):
+            for idx, t, v in zip(compute_positions, to_compute, vectors):
                 _hash = self._text_hash(t)
                 self.cache[_hash] = v
-                results.append(v)
+                results[idx] = v
             self._save_cache()
-        return results
+
+        return [result for result in results if result is not None]
 
     # def embed_documents(self, texts: list[str]) -> list[list[float]]:
     #     """多线程并行批量嵌入"""

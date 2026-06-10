@@ -9,7 +9,6 @@ import os
 from enum import Enum
 
 from langchain_chroma import Chroma
-from langchain_community.vectorstores.utils import filter_complex_metadata
 from langchain_core.documents import Document
 
 from cachembedding import CacheEmbedding
@@ -29,6 +28,8 @@ class IndexBuilder:
     加载文档 → HybridTextSplitter 切分 → Chroma.from_documents 向量化
     → 保存 bm25_corpus.json + parent_store.json。
     """
+
+    VECTOR_ADD_BATCH_SIZE = 1000
 
     def __init__(self, data_path: str, db_path: str, cache_path: str,
                  mode: RunMode = RunMode.OFFLINE):
@@ -91,10 +92,6 @@ class IndexBuilder:
     def _docs_to_corpus_entries(docs: list[Document]) -> list[dict]:
         return [{"content": doc.page_content, "metadata": doc.metadata} for doc in docs]
 
-    @staticmethod
-    def _corpus_entries_to_docs(entries: list[dict]) -> list[Document]:
-        return [Document(page_content=e["content"], metadata=e.get("metadata", {})) for e in entries]
-
     # ── 文档处理 ──────────────────────────────────────────
 
     def _process_documents(self) -> list[Document]:
@@ -112,15 +109,70 @@ class IndexBuilder:
             return ""
         return hashlib.md5(text.encode("utf-8")).hexdigest()
 
-    @staticmethod
-    def _serialize_metadata_for_chroma(docs: list[Document]) -> list[Document]:
-        """将 Chroma 不支持的复杂 metadata 值序列化为 JSON 字符串。"""
-        serialized = []
+    def _add_chunk_hashes(self, docs: list[Document]) -> list[Document]:
+        """Add a chunk-level hash while preserving the source document hash."""
+        hashed_docs = []
         for doc in docs:
             metadata = dict(doc.metadata or {})
+            metadata["chunk_hash"] = metadata.get("chunk_hash") or self._make_md5(doc.page_content)
+            hashed_docs.append(Document(page_content=doc.page_content, metadata=metadata))
+        return hashed_docs
+
+    def _entry_chunk_hash(self, entry: dict) -> str:
+        metadata = entry.get("metadata") or {}
+        return metadata.get("chunk_hash") or self._make_md5(entry.get("content") or "")
+
+    def _load_vector_chunk_hashes(self, db: Chroma) -> set[str]:
+        """Return chunk hashes already present in the vector index."""
+        existing = db.get(include=["metadatas", "documents"])
+        metadatas = existing.get("metadatas") or []
+        documents = existing.get("documents") or []
+
+        chunk_hashes = set()
+        for idx, metadata in enumerate(metadatas):
+            metadata = metadata or {}
+            chunk_hash = metadata.get("chunk_hash")
+            if not chunk_hash and idx < len(documents):
+                chunk_hash = self._make_md5(documents[idx] or "")
+            if chunk_hash:
+                chunk_hashes.add(chunk_hash)
+        return chunk_hashes
+
+    def _merge_bm25_corpus(self, existing: list[dict], docs: list[Document]) -> list[dict]:
+        """Merge corpus entries by chunk hash and normalize stored metadata."""
+        merged = []
+        seen = set()
+
+        for entry in existing:
+            chunk_hash = self._entry_chunk_hash(entry)
+            if not chunk_hash or chunk_hash in seen:
+                continue
+            metadata = dict(entry.get("metadata") or {})
+            metadata["chunk_hash"] = chunk_hash
+            merged.append({"content": entry.get("content") or "", "metadata": metadata})
+            seen.add(chunk_hash)
+
+        for entry in self._docs_to_corpus_entries(docs):
+            chunk_hash = self._entry_chunk_hash(entry)
+            if not chunk_hash or chunk_hash in seen:
+                continue
+            metadata = dict(entry.get("metadata") or {})
+            metadata["chunk_hash"] = chunk_hash
+            merged.append({"content": entry.get("content") or "", "metadata": metadata})
+            seen.add(chunk_hash)
+
+        return merged
+
+    @staticmethod
+    def _serialize_metadata_for_chroma(docs: list[Document]) -> list[Document]:
+        """Return documents whose metadata values are safe for Chroma."""
+        serialized = []
+        for doc in docs:
             normalized = {}
-            for key, value in metadata.items():
-                if isinstance(value, (str, int, float, bool)) or value is None:
+            for key, value in (doc.metadata or {}).items():
+                if value is None:
+                    continue
+                if isinstance(value, (str, int, float, bool)):
                     normalized[key] = value
                 elif isinstance(value, (list, dict)):
                     normalized[key] = json.dumps(value, ensure_ascii=False)
@@ -129,49 +181,49 @@ class IndexBuilder:
             serialized.append(Document(page_content=doc.page_content, metadata=normalized))
         return serialized
 
+    def _add_vector_documents_in_batches(
+        self,
+        db: Chroma,
+        vector_docs: list[Document],
+        source_docs: list[Document] | None = None,
+    ) -> None:
+        bm25_corpus = self._load_bm25_corpus() if source_docs is not None else None
+        for start in range(0, len(vector_docs), self.VECTOR_ADD_BATCH_SIZE):
+            end = start + self.VECTOR_ADD_BATCH_SIZE
+            db.add_documents(documents=vector_docs[start:end])
+            if source_docs is not None and bm25_corpus is not None:
+                bm25_corpus = self._merge_bm25_corpus(bm25_corpus, source_docs[start:end])
+                self._save_bm25_corpus(bm25_corpus)
+                self._save_parent_store()
+
     # ── 构建 / 追加 ───────────────────────────────────────
 
     def _build_db(self) -> Chroma:
-        docs = self._process_documents()
-        # 保存 BM25 语料（在 metadata 序列化之前保存原始 docs）
-        self._save_bm25_corpus(self._docs_to_corpus_entries(docs))
-        docs = self._serialize_metadata_for_chroma(docs)
-        docs = filter_complex_metadata(docs)
-        db = Chroma.from_documents(
-            documents=docs, embedding=self.embedding, persist_directory=self.db_path
+        docs = self._add_chunk_hashes(self._process_documents())
+        vector_docs = self._serialize_metadata_for_chroma(docs)
+        db = Chroma(
+            persist_directory=self.db_path,
+            embedding_function=self.embedding,
         )
-        self._save_parent_store()
+        self._add_vector_documents_in_batches(db, vector_docs, docs)
         print("✅ 向量数据库构建完成")
         return db
 
     def _append_db(self, db: Chroma) -> Chroma:
-        docs = self._process_documents()
-        # 更新 BM25 语料：追加新文档（按 content hash 去重）
-        existing_corpus = self._load_bm25_corpus()
-        existing_hashes = {e.get("metadata", {}).get("hash") for e in existing_corpus}
-        new_corpus = [
-            entry
-            for entry in self._docs_to_corpus_entries(docs)
-            if self._make_md5(entry["content"]) not in existing_hashes
+        docs = self._add_chunk_hashes(self._process_documents())
+        existing_chunk_hashes = self._load_vector_chunk_hashes(db)
+        docs = [
+            doc
+            for doc in docs
+            if doc.metadata.get("chunk_hash") not in existing_chunk_hashes
         ]
-        existing_corpus.extend(new_corpus)
-        self._save_bm25_corpus(existing_corpus)
-
-        docs = self._serialize_metadata_for_chroma(docs)
-        docs = filter_complex_metadata(docs)
-        exist_ids = set(
-            m.get("hash")
-            for m in db.get(include=["metadatas"])["metadatas"]
-            if m.get("hash")
-        )
-        docs = [d for d in docs if self._make_md5(d.page_content) not in exist_ids]
 
         if not docs:
             print("🟡 没有检测到新文档，数据库无需更新")
             return db
 
-        db.add_documents(documents=docs)
-        self._save_parent_store()
+        vector_docs = self._serialize_metadata_for_chroma(docs)
+        self._add_vector_documents_in_batches(db, vector_docs, docs)
         print("✅ 向量数据库更新完成")
         return db
 
