@@ -2,7 +2,7 @@
 
 ![Python](https://img.shields.io/badge/Python-3.10--3.12-blue)
 ![Framework](https://img.shields.io/badge/Framework-LangGraph-green)
-![Status](https://img.shields.io/badge/Status-MVP-yellow)
+![Status](https://img.shields.io/badge/Status-Final-green)
 
 ## 项目简介
 
@@ -48,7 +48,7 @@ User Query
 rag-service/
 ├── docs/                         # 项目文档
 │   ├── architecture.md           # 详细架构说明
-│   └── agentic-graph-retriever.md
+│   └── CS599_大作业报告.pdf       # 最终课程报告
 ├── src/                          # 项目源代码
 │   ├── main.py                   # 命令入口（build / query / serve）
 │   ├── cli.py                    # 命令行参数解析
@@ -130,9 +130,120 @@ python main.py query "你的问题" --topk 5
 
 首次配置预计 10-20 分钟；如需下载 BGE embedding / rerank 模型，额外耗时取决于网络。
 
-## API 调用（待完善）
+## API 调用
 
-`python main.py serve` 通过 `langgraph serve` 启动 LangGraph API 服务（默认 `http://127.0.0.1:2024`），但当前缺少 `src/langgraph.json` 配置文件，且 graph 对象未以模块级变量导出，`langgraph serve` 暂不可用。计划后续补充 `langgraph.json` 并将 `GraphRetriever` 封装为 LangGraph 可发现的服务入口。
+Final 版当前提供两类稳定调用方式：命令行 API 和 Python 内部 API。`serve`
+子命令作为 LangGraph 服务化入口预留，后续补齐 `langgraph.json` 和模块级
+graph 导出后可扩展为 HTTP API。
+
+### 1. 命令行 API
+
+命令行 API 适合本地构建索引、运行 Demo、复现实验和课程展示。
+
+```bash
+cd src
+
+# 查看全部命令
+python main.py --help
+
+# 构建或追加索引
+python main.py build --sample 100 --mode offline
+
+# 指定数据集构建
+python main.py build --sample 100 --datasets passage_retrieval_en,2wikimqa_e --mode offline
+
+# 执行一次 Agentic RAG 检索
+python main.py query "对比微服务和单体架构在可观测性上的差异" --topk 5
+```
+
+`query` 调用内部会自动完成以下流程：
+
+```text
+用户问题
+  -> LLM 改写查询
+  -> Agent 选择 vector_search / bm25_search / 双路检索
+  -> ReRanker 精排
+  -> 双路时执行 RRF 融合
+  -> LLM 充分性评估
+  -> parent_store 父块回填
+  -> 输出 final_docs
+```
+
+常用参数：
+
+| 命令 | 参数 | 说明 |
+|---|---|---|
+| `build` | `--sample N` | 采样构建，便于小样本验证；不传则按配置加载 |
+| `build` | `--datasets a,b` | 只加载指定数据集 |
+| `build` | `--mode offline` | 可新建或追加索引 |
+| `build` | `--mode online` | 只读加载已有索引 |
+| `query` | `--topk N` | 控制打印的最终文档数量 |
+
+### 2. Python 内部 API
+
+Python API 适合在脚本、Notebook 或上层服务中直接复用检索能力。
+以下示例默认在 `src/` 目录下执行；如果从项目根目录运行，需要先把 `src`
+加入 `PYTHONPATH`。
+
+```python
+from cli import _load_retriever
+
+retriever = _load_retriever()
+docs = retriever.invoke(
+    "BGE-M3 embedding 缓存如何减少重复构建成本？",
+    history=[],
+    thread_id="demo",
+)
+
+for doc in docs[:3]:
+    print(doc["content"][:300])
+    print(doc.get("metadata", {}))
+```
+
+核心接口：
+
+| 接口 | 输入 | 输出 | 用途 |
+|---|---|---|---|
+| `IndexBuilder.build()` | 数据路径、向量库路径、缓存路径 | Chroma 实例 | 离线索引构建 |
+| `GraphRetriever.invoke()` | `query`、`history`、`thread_id` | `list[dict]` | 同步 Agentic 检索 |
+| `GraphRetriever.ainvoke()` | `query`、`history`、`thread_id` | `list[dict]` | 异步 Agentic 检索 |
+| `BM25Retriever.invoke()` | 查询文本、`k` | `list[Document]` | 关键词召回 |
+| `ReRanker.rerank()` | 查询、候选文档、`top_k` | `list[Document]` | CrossEncoder 精排 |
+
+返回的 `final_docs` 结构如下：
+
+```python
+[
+    {
+        "content": "父块回填后的完整上下文文本",
+        "metadata": {
+            "dataset": "passage_retrieval_en",
+            "parent_id": "...",
+            "chunk_level": "parent"
+        }
+    }
+]
+```
+
+### 3. 服务化 API 预留
+
+`python main.py serve` 当前会调用 `langgraph serve`，用于后续 HTTP API
+服务化扩展。由于 Final 版重点是本地 Agentic RAG 检索闭环，仓库当前未提交
+`langgraph.json`，也未将 graph 以模块级变量导出，因此 HTTP 服务不作为本次
+最终交付的稳定入口。
+
+计划中的 HTTP 调用形式如下：
+
+```bash
+cd src
+python main.py serve
+
+# 默认服务地址由 langgraph serve 提供，通常为：
+# http://127.0.0.1:2024
+```
+
+后续只需补充 LangGraph 服务配置，即可把当前 `GraphRetriever.invoke()` 封装为
+可访问的 HTTP / MCP 工具能力。
 
 ## 环境要求
 
@@ -191,4 +302,4 @@ EMBEDDING_DEVICE=cpu python tests/test_vector_recall.py --sample-size 50 --ks 1,
 
 - [x] Proposal
 - [x] MVP
-- [ ] Final（待补充最终报告与完整实验结果）
+- [x] Final（已补充最终报告、License、测试评估与索引一致性结果）
