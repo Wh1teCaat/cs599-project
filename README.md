@@ -25,7 +25,7 @@
 - AI IDE: Trae CN
 - LLM: DeepSeek API
 - 框架: LangGraph
-- 容器: Docker
+- 部署: 本地 CLI / 展示级 HTTP API
 
 ## 架构说明
 
@@ -132,9 +132,10 @@ python main.py query "你的问题" --topk 5
 
 ## API 调用
 
-Final 版当前提供两类稳定调用方式：命令行 API 和 Python 内部 API。`serve`
-子命令作为 LangGraph 服务化入口预留，后续补齐 `langgraph.json` 和模块级
-graph 导出后可扩展为 HTTP API。
+Final 版当前提供三类调用方式：命令行 API、展示级 HTTP API 和 Python 内部
+API。HTTP API 使用 Python 标准库实现，不需要额外安装 FastAPI / Uvicorn；
+首次调用 `/query` 时会懒加载 Chroma、BM25、Reranker 和 LLM 配置，因此首次
+请求可能较慢。
 
 ### 1. 命令行 API
 
@@ -179,7 +180,77 @@ python main.py query "对比微服务和单体架构在可观测性上的差异"
 | `build` | `--mode online` | 只读加载已有索引 |
 | `query` | `--topk N` | 控制打印的最终文档数量 |
 
-### 2. Python 内部 API
+### 2. 展示级 HTTP API
+
+HTTP API 适合课程展示、Postman / curl 演示和前端 Demo 对接。启动服务：
+
+```bash
+cd src
+python main.py serve --host 127.0.0.1 --port 8000
+```
+
+健康检查：
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+返回示例：
+
+```json
+{
+  "status": "ok",
+  "service": "agentic-rag",
+  "retriever_loaded": false
+}
+```
+
+执行检索：
+
+```bash
+curl -X POST http://127.0.0.1:8000/query \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "对比微服务和单体架构在可观测性上的差异",
+    "top_k": 5,
+    "history": [],
+    "thread_id": "demo"
+  }'
+```
+
+请求字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `query` | string | 是 | 用户问题，不能为空 |
+| `top_k` | integer | 否 | 返回文档数，范围 1-20，默认 5 |
+| `history` | array | 否 | 对话历史，格式为 `{"role": "...", "content": "..."}` |
+| `thread_id` | string | 否 | 会话 ID，默认 `default` |
+
+响应结构：
+
+```json
+{
+  "query": "对比微服务和单体架构在可观测性上的差异",
+  "top_k": 5,
+  "count": 2,
+  "documents": [
+    {
+      "content": "父块回填后的完整上下文文本",
+      "metadata": {
+        "dataset": "passage_retrieval_en",
+        "parent_id": "...",
+        "chunk_level": "parent"
+      }
+    }
+  ]
+}
+```
+
+注意：`/health` 不加载模型，适合快速确认服务存活；`/query` 会执行真实
+Agentic RAG 检索，需要提前完成 `.env` 配置并构建好本地索引。
+
+### 3. Python 内部 API
 
 Python API 适合在脚本、Notebook 或上层服务中直接复用检索能力。
 以下示例默认在 `src/` 目录下执行；如果从项目根目录运行，需要先把 `src`
@@ -225,26 +296,6 @@ for doc in docs[:3]:
 ]
 ```
 
-### 3. 服务化 API 预留
-
-`python main.py serve` 当前会调用 `langgraph serve`，用于后续 HTTP API
-服务化扩展。由于 Final 版重点是本地 Agentic RAG 检索闭环，仓库当前未提交
-`langgraph.json`，也未将 graph 以模块级变量导出，因此 HTTP 服务不作为本次
-最终交付的稳定入口。
-
-计划中的 HTTP 调用形式如下：
-
-```bash
-cd src
-python main.py serve
-
-# 默认服务地址由 langgraph serve 提供，通常为：
-# http://127.0.0.1:2024
-```
-
-后续只需补充 LangGraph 服务配置，即可把当前 `GraphRetriever.invoke()` 封装为
-可访问的 HTTP / MCP 工具能力。
-
 ## 环境要求
 
 - Python 3.12
@@ -264,6 +315,7 @@ python main.py serve
 - 索引构建 / 追加的分批写入与 BM25 同步单元测试
 - RAG 排序指标公式测试
 - 索引一致性汇总逻辑测试
+- 展示级 HTTP API 契约测试
 - 当前真实落盘索引的一致性检查（Chroma、BM25、parent_store）
 
 ```bash
@@ -287,6 +339,9 @@ python tests/test_index_consistency.py
 
 # 指标公式：rank、MRR@K、nDCG@K
 python tests/test_rag_evaluation_metrics.py
+
+# 展示级 HTTP API：参数校验、响应结构、top_k 截断
+python tests/test_api_contract.py
 
 # 真实向量检索效果：Recall@K、MRR@K、nDCG@K
 EMBEDDING_DEVICE=cpu python tests/test_vector_recall.py --sample-size 50 --ks 1,5,10,20

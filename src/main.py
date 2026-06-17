@@ -9,7 +9,7 @@
       单次检索。Agent 自主选择向量/BM25/双路，RRF 融合，父块回填。
 
   python main.py serve
-      启动 LangGraph API 服务。
+      启动展示级 HTTP API 服务，提供 /health 和 /query。
 """
 
 import argparse
@@ -55,7 +55,18 @@ def main():
     )
 
     # ---- serve ----
-    sub.add_parser("serve", help="启动 LangGraph API 服务")
+    serve_parser = sub.add_parser("serve", help="启动展示级 HTTP API 服务")
+    serve_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="监听地址（默认 127.0.0.1）",
+    )
+    serve_parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="监听端口（默认 8000）",
+    )
 
     args = parser.parse_args()
 
@@ -69,9 +80,8 @@ def main():
         query(args.text, top_k=args.topk)
 
     elif args.command == "serve":
-        import subprocess
-        print("启动 LangGraph API 服务...")
-        subprocess.run(["langgraph", "serve"], check=False)
+        from api import run_server
+        run_server(host=args.host, port=args.port)
 
     else:
         parser.print_help()

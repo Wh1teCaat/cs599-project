@@ -71,6 +71,11 @@ def main() -> int:
             None,
         ),
         (
+            "展示级 HTTP API 契约测试",
+            [python, "tests/test_api_contract.py"],
+            None,
+        ),
+        (
             "真实落盘索引一致性检查",
             [python, "tests/test_index_consistency.py"],
             None,
